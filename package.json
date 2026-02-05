@@ -1,8 +1,9 @@
 {
   "name": "shini-voice",
   "version": "1.0.0",
-  "description": "",
+  "description": "Discord Voice Bot",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "start": "node index.js"
   },
