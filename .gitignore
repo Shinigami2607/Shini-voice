@@ -1,4 +1,4 @@
-# Token file - PRIVATE
+# Token files - PRIVATE
 token.js
 config.json
 .env
@@ -8,3 +8,8 @@ node_modules/
 
 # Logs
 *.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
