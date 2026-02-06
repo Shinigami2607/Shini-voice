@@ -1,0 +1,10 @@
+# Token file - PRIVATE
+token.js
+config.json
+.env
+
+# Node modules
+node_modules/
+
+# Logs
+*.log
