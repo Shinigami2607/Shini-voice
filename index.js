@@ -1,213 +1,872 @@
-import { Client, GatewayIntentBits, ChannelType, PermissionsBitField, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, Events, Collection } from 'discord.js';
-import http from 'http';
-
-// السيرفر لضمان بقاء البوت شغال
-http.createServer((req, res) => { res.write("Shini Voice PRO is Online!"); res.end(); }).listen(process.env.PORT || 3000);
+import { 
+    Client, 
+    GatewayIntentBits, 
+    Events, 
+    PermissionsBitField, 
+    EmbedBuilder, 
+    ActionRowBuilder, 
+    ButtonBuilder, 
+    ButtonStyle, 
+    StringSelectMenuBuilder, 
+    StringSelectMenuOptionBuilder, 
+    ModalBuilder, 
+    TextInputBuilder, 
+    TextInputStyle, 
+    ChannelType, 
+    PermissionFlagsBits, 
+    Collection, 
+    REST, 
+    Routes, 
+    RoleSelectMenuBuilder, 
+    UserSelectMenuBuilder 
+} from 'discord.js';
+import 'dotenv/config';
 
 const client = new Client({
     intents: [
-        GatewayIntentBits.Guilds, 
-        GatewayIntentBits.GuildVoiceStates, 
-        GatewayIntentBits.GuildMessages, 
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildVoiceStates,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.GuildPresences,
         GatewayIntentBits.MessageContent
     ]
 });
 
-// قاعدة بيانات مؤقتة (سيتم تحسينها مستقبلاً لتكون دائمة)
-const activeChannels = new Map();
-const setupConfig = new Map(); // لحفظ إعدادات القنوات والكاتيغوريز
+// ==========================================
+// STATE MANAGEMENT
+// ==========================================
+const tempRooms = new Collection();        // voiceChannelId -> { ownerId, textChannelId, createdAt, motherChannelId }
+const motherChannels = new Collection();   // channelId -> { guildId, creatorId }
+const staffRoles = new Collection();       // guildId -> roleId
+const guildSettings = new Collection();    // guildId -> { adminRoleId }
 
-client.once('ready', () => {
-    console.log(`✅ ${client.user.tag} Is Ready! Version: V2 Pro`);
-});
+// Constants
+const MOTHER_PREFIX = '➕';
+const AUTO_DELETE_MS = 10000;
+const ADMIN_ROLE_NAME = 'TempVoice Admin';
 
-// --- 1. نظام الـ Setup (الأوامر) ---
-client.on('messageCreate', async (message) => {
-    if (message.author.bot || !message.content.startsWith('!')) return;
+// ==========================================
+// UTILITY FUNCTIONS
+// ==========================================
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-    const args = message.content.slice(1).trim().split(/ +/);
-    const command = args.shift().toLowerCase();
+const autoDeleteReply = async (interaction, content, ephemeral = true) => {
+    try {
+        const reply = await interaction.reply({ content, ephemeral, fetchReply: true });
+        setTimeout(() => reply.delete().catch(() => {}), AUTO_DELETE_MS);
+        return reply;
+    } catch (e) {
+        console.error('Auto-delete reply error:', e);
+    }
+};
 
-    if (command === 'setup') {
-        if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
+const autoDeleteUpdate = async (interaction, content, ephemeral = true) => {
+    try {
+        await interaction.update({ content, components: [], embeds: [], ephemeral });
+        const message = await interaction.fetchReply();
+        setTimeout(() => message.delete().catch(() => {}), AUTO_DELETE_MS);
+    } catch (e) {
+        console.error('Auto-delete update error:', e);
+    }
+};
+
+const autoDeleteFollowUp = async (interaction, content, ephemeral = true) => {
+    try {
+        const reply = await interaction.followUp({ content, ephemeral, fetchReply: true });
+        setTimeout(() => reply.delete().catch(() => {}), AUTO_DELETE_MS);
+        return reply;
+    } catch (e) {
+        console.error('Auto-delete followUp error:', e);
+    }
+};
+
+// ==========================================
+// PERMISSION CHECKS
+// ==========================================
+const isServerOwner = (member) => member.id === member.guild.ownerId;
+
+const isStaff = (member) => {
+    if (isServerOwner(member)) return true;
+    const staffRoleId = staffRoles.get(member.guild.id);
+    if (!staffRoleId) return false;
+    return member.roles.cache.has(staffRoleId);
+};
+
+const isRoomOwner = (channelId, userId) => {
+    const room = tempRooms.get(channelId);
+    return room?.ownerId === userId;
+};
+
+const getRoomDataByTextChannel = (textChannelId) => {
+    for (const [voiceId, data] of tempRooms) {
+        if (data.textChannelId === textChannelId) return { voiceChannelId: voiceId, ...data };
+    }
+    return null;
+};
+
+// ==========================================
+// AUTO-SETUP: CREATE ADMIN ROLE
+// ==========================================
+const setupGuildAdminRole = async (guild) => {
+    try {
+        // Check if role already exists
+        let adminRole = guild.roles.cache.find(r => r.name === ADMIN_ROLE_NAME);
         
-        const channelName = args.join(' ') || "Join to Create";
-        const category = message.channel.parent;
-
-        if (!category) return message.reply("❌ عافاك حط هاد الأمر فشي قناة داخل كاتيغوري!");
-
-        const voiceChannel = await message.guild.channels.create({
-            name: channelName,
-            type: ChannelType.GuildVoice,
-            parent: category.id,
-            permissionOverwrites: [
-                { id: message.guild.id, allow: [PermissionsBitField.Flags.Connect] }
-            ]
-        });
-
-        setupConfig.set(voiceChannel.id, { categoryId: category.id });
-        message.reply(`✅ تم إنشاء قناة **${channelName}** بنجاح في كاتيغوري **${category.name}**`);
-    }
-});
-
-// --- 2. نظام إنشاء الغرف وتحديث الواجهة ---
-client.on('voiceStateUpdate', async (oldState, newState) => {
-    // التحقق من قناة "Join to Create" (سواء المعرفة يدويا أو بالـ Setup)
-    const isSetupChannel = setupConfig.has(newState.channelId) || newState.channel?.name === "Join to Create";
-
-    if (isSetupChannel && !newState.member.user.bot) {
-        const member = newState.member;
-        const parentId = newState.channel.parentId;
-
-        const channel = await newState.guild.channels.create({
-            name: `🔊 ${member.user.username}'s Room`,
-            type: ChannelType.GuildVoice,
-            parent: parentId,
-            permissionOverwrites: [
-                { id: member.id, allow: [PermissionsBitField.Flags.ManageChannels, PermissionsBitField.Flags.MoveMembers, PermissionsBitField.Flags.Connect] },
-                { id: newState.guild.id, allow: [PermissionsBitField.Flags.Connect] }
-            ]
-        });
-
-        await member.voice.setChannel(channel);
-
-        // إنشاء لوحة التحكم المتطورة
-        const embed = createEmbed(member, 'Unlocked', 'No Limit');
-        const rows = createButtons();
-
-        const msg = await channel.send({ content: `<@${member.id}>`, embeds: [embed], components: rows });
-        activeChannels.set(channel.id, { ownerId: member.id, msgId: msg.id, status: 'Unlocked', limit: 0 });
-    }
-
-    // --- 3. نظام التنظيف (Cleanup) ---
-    // إذا غادر الجميع القناة
-    if (oldState.channel && oldState.channel.members.size === 0) {
-        // إذا كانت القناة مسجلة في البوت كقناة مؤقتة
-        if (activeChannels.has(oldState.channel.id)) {
-            await oldState.channel.delete().catch(() => {});
-            activeChannels.delete(oldState.channel.id);
-        } 
-        // أو إذا كانت تبدأ بعلامة البوت ولم يتم مسحها (حل مشكلة القنوات العالقة)
-        else if (oldState.channel.name.startsWith('🔊')) {
-            await oldState.channel.delete().catch(() => {});
+        if (!adminRole) {
+            // Create the role with Administrator permissions
+            adminRole = await guild.roles.create({
+                name: ADMIN_ROLE_NAME,
+                permissions: [PermissionsBitField.Flags.Administrator],
+                color: 0x5865F2,
+                hoist: true,
+                mentionable: false,
+                reason: 'TempVoice System - Auto-setup Admin Role'
+            });
+            console.log(`Created ${ADMIN_ROLE_NAME} in ${guild.name}`);
         }
+
+        // Store in settings
+        guildSettings.set(guild.id, { adminRoleId: adminRole.id });
+
+        // Attempt to position the role as high as possible (just below bot's highest role)
+        const botMember = await guild.members.fetch(client.user.id);
+        const botHighestRole = botMember.roles.highest;
+        
+        if (botHighestRole && botHighestRole.position > adminRole.position) {
+            // Position it just below the bot's highest role
+            const newPosition = botHighestRole.position - 1;
+            if (newPosition > 0) {
+                await adminRole.setPosition(newPosition).catch(err => {
+                    console.log(`Could not reposition role in ${guild.name}: ${err.message}`);
+                });
+            }
+        }
+
+        // Assign the role to the bot
+        if (!botMember.roles.cache.has(adminRole.id)) {
+            await botMember.roles.add(adminRole).catch(err => {
+                console.log(`Could not assign admin role to bot in ${guild.name}: ${err.message}`);
+            });
+        }
+
+        return adminRole;
+    } catch (error) {
+        console.error(`Failed to setup admin role in ${guild.name}:`, error);
+        return null;
     }
-});
+};
 
-// --- 4. التعامل مع الأزرار والمودلز (V2) ---
-client.on(Events.InteractionCreate, async interaction => {
-    if (!interaction.isButton() && !interaction.isModalSubmit() && !interaction.isStringSelectMenu()) return;
+// ==========================================
+// INTERFACE CREATION
+// ==========================================
+const createRoomInterface = async (textChannel, voiceChannel) => {
+    const embed = new EmbedBuilder()
+        .setTitle('🎙️ Voice Room Control Panel')
+        .setDescription(`**Channel:** <#${voiceChannel.id}>\n**Owner:** <@${tempRooms.get(voiceChannel.id)?.ownerId}>\n\nManage your room using the controls below.`)
+        .setColor(0x5865F2)
+        .setThumbnail('https://cdn.discordapp.com/emojis/1056024654695182356.webp')
+        .addFields(
+            { name: '🔒 Lock System', value: 'Control room access', inline: true },
+            { name: '👥 User Limit', value: 'Set capacity (0-99)', inline: true },
+            { name: '✏️ Rename', value: 'Change channel name', inline: true },
+            { name: '💬 Text Chat', value: 'Toggle chat visibility', inline: true },
+            { name: '🛡️ Moderation', value: 'Ban, Unban, Kick users', inline: true },
+            { name: '👑 Ownership', value: 'Claim or Transfer', inline: true }
+        )
+        .setFooter({ text: 'TempVoice System • Buttons are isolated to this room only' })
+        .setTimestamp();
 
-    const channel = interaction.channel;
-    const roomInfo = activeChannels.get(interaction.channelId);
+    const row1 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('lock').setLabel('🔒 Lock').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('unlock').setLabel('🔓 Unlock').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('limit').setLabel('👥 Limit').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('rename').setLabel('✏️ Rename').setStyle(ButtonStyle.Primary)
+    );
 
-    // التحقق من الملكية (إلا زر الـ Claim)
-    if (interaction.customId !== 'v_claim' && (!roomInfo || interaction.user.id !== roomInfo.ownerId)) {
-        return interaction.reply({ content: "❌ هاد الروم ماشي ديالك أو ما عندكش صلاحية!", ephemeral: true });
-    }
+    const row2 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('chat_on').setLabel('💬 Chat ON').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('chat_off').setLabel('🚫 Chat OFF').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId('ban').setLabel('🚫 Ban').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId('unban').setLabel('✅ Unban').setStyle(ButtonStyle.Success)
+    );
 
-    // حل مشكلة Interaction Failed
-    if (interaction.isButton()) await interaction.deferUpdate();
+    const row3 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('kick').setLabel('👢 Kick').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId('claim').setLabel('👑 Claim').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('transfer').setLabel('🔄 Transfer').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('invite').setLabel('📩 Invite').setStyle(ButtonStyle.Secondary)
+    );
 
     try {
-        switch (interaction.customId) {
-            case 'v_lock':
-                await channel.permissionOverwrites.edit(interaction.guild.id, { Connect: false });
-                roomInfo.status = 'Locked';
-                updatePanel(interaction);
-                break;
+        const msg = await textChannel.send({ embeds: [embed], components: [row1, row2, row3] });
+        return msg.id;
+    } catch (error) {
+        console.error('Failed to create interface:', error);
+        return null;
+    }
+};
 
-            case 'v_unlock':
-                await channel.permissionOverwrites.edit(interaction.guild.id, { Connect: true });
-                roomInfo.status = 'Unlocked';
-                updatePanel(interaction);
-                break;
+// ==========================================
+// COMMANDS DEFINITION
+// ==========================================
+const commands = [
+    {
+        name: 'setrole',
+        description: 'Set the staff role for TempVoice management (Server Owner only)',
+        type: 1,
+        default_member_permissions: PermissionFlagsBits.Administrator
+    },
+    {
+        name: 'voice',
+        description: 'Create a mother channel generator (Staff only)',
+        type: 1,
+        options: [
+            {
+                name: 'name',
+                description: 'Name for the mother channel',
+                type: 3,
+                required: true
+            }
+        ]
+    }
+];
 
-            case 'v_rename':
-                const renameModal = new ModalBuilder().setCustomId('m_rename').setTitle('Rename Your Room');
-                const nameInput = new TextInputBuilder().setCustomId('new_name').setLabel("New Name").setStyle(TextInputStyle.Short).setMaxLength(20);
-                renameModal.addComponents(new ActionRowBuilder().addComponents(nameInput));
-                await interaction.followUp({ components: [], content: 'Checking...', ephemeral: true }); // لفتح المودل بشكل صحيح
-                return interaction.showModal(renameModal);
+// ==========================================
+// EVENT: BOT READY
+// ==========================================
+client.once(Events.ClientReady, async () => {
+    console.log(`✅ Bot logged in as ${client.user.tag}`);
+    
+    try {
+        const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+        await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+        console.log('🚀 Global commands registered');
+    } catch (error) {
+        console.error('❌ Command registration failed:', error);
+    }
 
-            case 'v_limit':
-                const limitModal = new ModalBuilder().setCustomId('m_limit').setTitle('Set User Limit');
-                const limitInput = new TextInputBuilder().setCustomId('user_limit').setLabel("Number (0-99)").setStyle(TextInputStyle.Short).setMaxLength(2);
-                limitModal.addComponents(new ActionRowBuilder().addComponents(limitInput));
-                return interaction.showModal(limitModal);
+    // Setup existing guilds (in case bot was offline during invites)
+    for (const guild of client.guilds.cache.values()) {
+        await setupGuildAdminRole(guild);
+    }
+});
 
-            case 'v_kick':
-                // نفتح مودل لإدخال ID الشخص المراد طرده أو نستخدم قائمة المبرز
-                await interaction.followUp({ content: "⚠️ الميزة قيد التطوير، استعمل الأمر `!kick` حالياً", ephemeral: true });
-                break;
-                
-            case 'v_claim':
-                if (channel.members.size > 0 && !channel.members.has(roomInfo.ownerId)) {
-                    roomInfo.ownerId = interaction.user.id;
-                    updatePanel(interaction);
-                }
-                break;
+// ==========================================
+// EVENT: GUILD CREATE (AUTO-SETUP)
+// ==========================================
+client.on(Events.GuildCreate, async (guild) => {
+    console.log(`📥 Joined guild: ${guild.name} (${guild.id})`);
+    await setupGuildAdminRole(guild);
+});
+
+// ==========================================
+// EVENT: VOICE STATE UPDATE (CORE LOGIC)
+// ==========================================
+client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
+    // CASE 1: User joined a channel (not switched)
+    if (newState.channel && !oldState.channel) {
+        const channel = newState.channel;
+        
+        // Check if it's a mother channel
+        const isMother = channel.name.startsWith(MOTHER_PREFIX) || motherChannels.has(channel.id);
+        
+        if (isMother) {
+            try {
+                // Create voice channel
+                const roomName = `🎙️ ${newState.member.displayName}'s Room`;
+                const voiceChannel = await channel.guild.channels.create({
+                    name: roomName,
+                    type: ChannelType.GuildVoice,
+                    parent: channel.parentId,
+                    permissionOverwrites: [
+                        {
+                            id: channel.guild.id,
+                            allow: [PermissionsBitField.Flags.Connect]
+                        },
+                        {
+                            id: newState.member.id,
+                            allow: [
+                                PermissionsBitField.Flags.ManageChannels,
+                                PermissionsBitField.Flags.MuteMembers,
+                                PermissionsBitField.Flags.DeafenMembers,
+                                PermissionsBitField.Flags.MoveMembers,
+                                PermissionsBitField.Flags.ViewChannel
+                            ]
+                        }
+                    ]
+                });
+
+                // Create associated text channel
+                const textChannelName = `room-${newState.member.displayName.toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
+                const textChannel = await channel.guild.channels.create({
+                    name: textChannelName,
+                    type: ChannelType.GuildText,
+                    parent: channel.parentId,
+                    permissionOverwrites: [
+                        {
+                            id: channel.guild.id,
+                            deny: [PermissionsBitField.Flags.ViewChannel]
+                        },
+                        {
+                            id: newState.member.id,
+                            allow: [
+                                PermissionsBitField.Flags.ViewChannel,
+                                PermissionsBitField.Flags.SendMessages,
+                                PermissionsBitField.Flags.ReadMessageHistory,
+                                PermissionsBitField.Flags.EmbedLinks,
+                                PermissionsBitField.Flags.AttachFiles
+                            ]
+                        }
+                    ]
+                });
+
+                // Store room data
+                tempRooms.set(voiceChannel.id, {
+                    ownerId: newState.member.id,
+                    textChannelId: textChannel.id,
+                    createdAt: Date.now(),
+                    motherChannelId: channel.id
+                });
+
+                // Move user to new room
+                await newState.member.voice.setChannel(voiceChannel);
+
+                // Create control interface
+                await createRoomInterface(textChannel, voiceChannel);
+
+            } catch (error) {
+                console.error('❌ Error creating temp room:', error);
+                try {
+                    await newState.member.send('❌ Ma qdertch ncreé room! Jareb merra okhra.').catch(() => {});
+                } catch {}
+            }
         }
-    } catch (e) { console.error(e); }
-});
-
-// معالجة المودلز (Modals)
-client.on(Events.InteractionCreate, async i => {
-    if (!i.isModalSubmit()) return;
-    const roomInfo = activeChannels.get(i.channelId);
-
-    if (i.customId === 'm_rename') {
-        const name = i.fields.getTextInputValue('new_name');
-        await i.channel.setName(`🔊 ${name}`);
-        await i.reply({ content: `✅ تم تغيير الاسم لـ: ${name}`, ephemeral: true });
     }
 
-    if (i.customId === 'm_limit') {
-        const limit = parseInt(i.fields.getTextInputValue('user_limit'));
-        if (isNaN(limit) || limit < 0 || limit > 99) return i.reply({ content: "❌ رقم غير صحيح!", ephemeral: true });
-        await i.channel.setUserLimit(limit);
-        roomInfo.limit = limit === 0 ? 'No Limit' : limit;
-        await i.reply({ content: `✅ تم تحديد العدد في: ${limit}`, ephemeral: true });
-        updatePanel(i);
+    // CASE 2: User left a channel completely (not switched)
+    if (oldState.channel && !newState.channel) {
+        const roomData = tempRooms.get(oldState.channel.id);
+        
+        if (roomData && roomData.ownerId === oldState.member.id) {
+            // Owner left - DELETE IMMEDIATELY
+            try {
+                const textChannel = oldState.guild.channels.cache.get(roomData.textChannelId);
+                
+                // Delete text channel first
+                if (textChannel) {
+                    await textChannel.delete().catch(err => console.log('Text channel delete error:', err));
+                }
+                
+                // Delete voice channel
+                await oldState.channel.delete().catch(err => console.log('Voice channel delete error:', err));
+                
+                // Clean up state
+                tempRooms.delete(oldState.channel.id);
+                console.log(`🗑️ Deleted room owned by ${oldState.member.displayName} (owner left)`);
+            } catch (error) {
+                console.error('❌ Error deleting room:', error);
+            }
+        }
+    }
+
+    // CASE 3: User switched channels
+    if (oldState.channel && newState.channel && oldState.channel.id !== newState.channel.id) {
+        const roomData = tempRooms.get(oldState.channel.id);
+        
+        // If owner switched out of their room, delete it
+        if (roomData && roomData.ownerId === oldState.member.id) {
+            try {
+                const textChannel = oldState.guild.channels.cache.get(roomData.textChannelId);
+                
+                if (textChannel) await textChannel.delete().catch(() => {});
+                await oldState.channel.delete().catch(() => {});
+                
+                tempRooms.delete(oldState.channel.id);
+                console.log(`🗑️ Deleted room (owner switched to another channel)`);
+            } catch (error) {
+                console.error('❌ Error deleting room on switch:', error);
+            }
+        }
     }
 });
 
-// --- وظائف مساعدة (Helper Functions) ---
+// ==========================================
+// EVENT: INTERACTION CREATE
+// ==========================================
+client.on(Events.InteractionCreate, async (interaction) => {
+    try {
+        // ==================== SLASH COMMANDS ====================
+        if (interaction.isChatInputCommand()) {
+            
+            // /setrole - Server Owner only
+            if (interaction.commandName === 'setrole') {
+                if (!isServerOwner(interaction.member)) {
+                    return await autoDeleteReply(interaction, '⛔ Hada command khasso ykoun Server Owner berra7! Ma3ndksh l7e9.');
+                }
 
-function createEmbed(member, status, limit) {
-    return new EmbedBuilder()
-        .setColor('#5865F2')
-        .setTitle('🎛️ Control Panel | Shini Voice')
-        .setDescription('استخدم الأزرار أسفله للتحكم في غرفتك الخاصة')
-        .addFields(
-            { name: '👤 Owner', value: `<@${member.id}>`, inline: true },
-            { name: '🔒 Status', value: status, inline: true },
-            { name: '👥 Limit', value: `${limit}`, inline: true }
-        )
-        .setTimestamp();
-}
+                const row = new ActionRowBuilder().addComponents(
+                    new RoleSelectMenuBuilder()
+                        .setCustomId('select_staff_role')
+                        .setPlaceholder('Sélectionné staff role mn lista')
+                );
 
-function createButtons() {
-    const row1 = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('v_lock').setLabel('Lock').setStyle(ButtonStyle.Danger),
-        new ButtonBuilder().setCustomId('v_unlock').setLabel('Unlock').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId('v_rename').setLabel('Rename').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('v_limit').setLabel('Limit').setStyle(ButtonStyle.Secondary)
-    );
-    const row2 = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('v_kick').setLabel('Kick').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('v_block').setLabel('Block').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('v_claim').setLabel('Claim').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId('v_delete').setLabel('Delete').setStyle(ButtonStyle.Danger)
-    );
-    return [row1, row2];
-}
+                return await interaction.reply({
+                    content: '👇 Sélectionné role li ghadi ykoun staff:',
+                    components: [row],
+                    ephemeral: true
+                });
+            }
 
-async function updatePanel(interaction) {
-    const roomInfo = activeChannels.get(interaction.channelId);
-    const owner = await interaction.guild.members.fetch(roomInfo.ownerId);
-    const embed = createEmbed(owner, roomInfo.status, roomInfo.limit || 'No Limit');
-    await interaction.editReply({ embeds: [embed] });
-}
+            // /voice - Staff only
+            if (interaction.commandName === 'voice') {
+                if (!isStaff(interaction.member)) {
+                    return await autoDeleteReply(interaction, '⛔ Vérifié role d staff! Ma3ndksh l7e9 bch tcreé mother channel.');
+                }
 
+                const name = interaction.options.getString('name');
+                if (!name || name.length < 1 || name.length > 100) {
+                    return await autoDeleteReply(interaction, '❌ Smit channel khasso ykoun m3ayyan o ma yfoutch 100 character!');
+                }
+
+                try {
+                    const channel = await interaction.guild.channels.create({
+                        name: `${MOTHER_PREFIX} ${name}`,
+                        type: ChannelType.GuildVoice,
+                        permissionOverwrites: [
+                            {
+                                id: interaction.guild.id,
+                                allow: [PermissionsBitField.Flags.Connect, PermissionsBitField.Flags.ViewChannel]
+                            }
+                        ]
+                    });
+
+                    motherChannels.set(channel.id, {
+                        guildId: interaction.guild.id,
+                        creatorId: interaction.user.id
+                    });
+
+                    return await autoDeleteReply(interaction, `✅ Safye, créé mother channel: **${channel.name}**`);
+                } catch (error) {
+                    console.error('Mother channel creation error:', error);
+                    return await autoDeleteReply(interaction, '❌ Ma qdertch ncreé channel! Vérifié permissions dyali.');
+                }
+            }
+        }
+
+        // ==================== ROLE SELECT MENU ====================
+        if (interaction.isRoleSelectMenu() && interaction.customId === 'select_staff_role') {
+            const roleId = interaction.values[0];
+            staffRoles.set(interaction.guild.id, roleId);
+            
+            await autoDeleteUpdate(interaction, `✅ Staff role tbeddel b nja7! Daba role <@&${roleId}> y9der ycreé mother channels.`);
+            return;
+        }
+
+        // ==================== BUTTON INTERACTIONS ====================
+        if (interaction.isButton()) {
+            // Find room data by text channel
+            const roomInfo = getRoomDataByTextChannel(interaction.channel.id);
+            
+            if (!roomInfo) {
+                return await autoDeleteReply(interaction, '❌ Hada mashi room dyalk! Had interface ma khdamch hna.');
+            }
+
+            const { voiceChannelId, ownerId } = roomInfo;
+            const voiceChannel = interaction.guild.channels.cache.get(voiceChannelId);
+            
+            if (!voiceChannel) {
+                return await autoDeleteReply(interaction, '❌ Room ma kaynch! Ymkn tdelet.');
+            }
+
+            const isOwner = ownerId === interaction.user.id;
+            const memberInRoom = voiceChannel.members.has(interaction.user.id);
+
+            switch (interaction.customId) {
+                case 'lock': {
+                    if (!isOwner) return await autoDeleteReply(interaction, '⛔ Hada mashi room dyalk! Ghir owner y9der isekk room.');
+                    
+                    await voiceChannel.permissionOverwrites.edit(interaction.guild.id, { Connect: false });
+                    return await autoDeleteReply(interaction, '🔒 Room tsekkert b nja7! Hta wahed ma y9der ydkhel daba.');
+                }
+
+                case 'unlock': {
+                    if (!isOwner) return await autoDeleteReply(interaction, '⛔ Hada mashi room dyalk! Ghir owner y9der ifette7 room.');
+                    
+                    await voiceChannel.permissionOverwrites.edit(interaction.guild.id, { Connect: true });
+                    return await autoDeleteReply(interaction, '🔓 Room tfett7et b nja7! Kola wahed y9der ydkhel daba.');
+                }
+
+                case 'limit': {
+                    if (!isOwner) return await autoDeleteReply(interaction, '⛔ Hada mashi room dyalk! Ghir owner y9der ibdel limit.');
+                    
+                    const modal = new ModalBuilder()
+                        .setCustomId('limit_modal')
+                        .setTitle('User Limit Settings');
+                    
+                    const input = new TextInputBuilder()
+                        .setCustomId('limit_value')
+                        .setLabel('Ch7al men user? (0 = unlimited, 1-99)')
+                        .setStyle(TextInputStyle.Short)
+                        .setPlaceholder('0')
+                        .setRequired(true)
+                        .setMaxLength(2);
+                    
+                    modal.addComponents(new ActionRowBuilder().addComponents(input));
+                    return await interaction.showModal(modal);
+                }
+
+                case 'rename': {
+                    if (!isOwner) return await autoDeleteReply(interaction, '⛔ Hada mashi room dyalk! Ghir owner y9der ibdel smiya.');
+                    
+                    const modal = new ModalBuilder()
+                        .setCustomId('rename_modal')
+                        .setTitle('Rename Channel');
+                    
+                    const input = new TextInputBuilder()
+                        .setCustomId('new_name')
+                        .setLabel('Smit jdid dyal room:')
+                        .setStyle(TextInputStyle.Short)
+                        .setPlaceholder('My Awesome Room')
+                        .setRequired(true)
+                        .setMaxLength(100);
+                    
+                    modal.addComponents(new ActionRowBuilder().addComponents(input));
+                    return await interaction.showModal(modal);
+                }
+
+                case 'chat_on': {
+                    if (!isOwner) return await autoDeleteReply(interaction, '⛔ Hada mashi room dyalk! Ghir owner y9der ifette7 chat.');
+                    
+                    await interaction.channel.permissionOverwrites.edit(interaction.guild.id, { SendMessages: true });
+                    return await autoDeleteReply(interaction, '💬 Chat tfet7 b nja7! Daba kola wahed y9der yktéb.');
+                }
+
+                case 'chat_off': {
+                    if (!isOwner) return await autoDeleteReply(interaction, '⛔ Hada mashi room dyalk! Ghir owner y9der isekk chat.');
+                    
+                    await interaction.channel.permissionOverwrites.edit(interaction.guild.id, { SendMessages: false });
+                    return await autoDeleteReply(interaction, '🚫 Chat tsedd b nja7! Hta wahed ma y9der yktéb daba.');
+                }
+
+                case 'ban': {
+                    if (!isOwner) return await autoDeleteReply(interaction, '⛔ Hada mashi room dyalk! Ghir owner y9der ibanni.');
+                    
+                    const members = voiceChannel.members.filter(m => m.id !== ownerId);
+                    if (members.size === 0) {
+                        return await autoDeleteReply(interaction, '❌ Makayen hta user f room bch tbannih!');
+                    }
+
+                    const row = new ActionRowBuilder().addComponents(
+                        new UserSelectMenuBuilder()
+                            .setCustomId('ban_user_select')
+                            .setPlaceholder('Sélectionné user li bghiti tbannih')
+                            .setMaxValues(1)
+                    );
+                    
+                    return await interaction.reply({
+                        content: '🚫 Sélectionné user li bghiti tbannih men room:',
+                        components: [row],
+                        ephemeral: true
+                    });
+                }
+
+                case 'unban': {
+                    if (!isOwner) return await autoDeleteReply(interaction, '⛔ Hada mashi room dyalk! Ghir owner y9der iunbanni.');
+                    
+                    // Find banned users (those denied Connect permission)
+                    const bannedOverwrites = voiceChannel.permissionOverwrites.cache.filter(
+                        perm => perm.deny.has(PermissionsBitField.Flags.Connect) && perm.type === 1
+                    );
+                    
+                    if (bannedOverwrites.size === 0) {
+                        return await autoDeleteReply(interaction, '❌ Makayen hta user mbani f had room!');
+                    }
+
+                    const options = bannedOverwrites.map((perm, userId) => {
+                        const member = interaction.guild.members.cache.get(userId);
+                        return new StringSelectMenuOptionBuilder()
+                            .setLabel(member?.displayName || userId)
+                            .setValue(userId)
+                            .setDescription(member ? 'Click bch t7iyed ban' : 'Unknown User');
+                    }).slice(0, 25);
+
+                    const row = new ActionRowBuilder().addComponents(
+                        new StringSelectMenuBuilder()
+                            .setCustomId('unban_user_select')
+                            .setPlaceholder('Sélectionné user li bghiti t7iyed lban')
+                            .addOptions(options)
+                    );
+                    
+                    return await interaction.reply({
+                        content: '✅ Sélectionné user li bghiti t7iyed lban:',
+                        components: [row],
+                        ephemeral: true
+                    });
+                }
+
+                case 'kick': {
+                    if (!isOwner) return await autoDeleteReply(interaction, '⛔ Hada mashi room dyalk! Ghir owner y9der ikicki.');
+                    
+                    const members = voiceChannel.members.filter(m => m.id !== ownerId);
+                    if (members.size === 0) {
+                        return await autoDeleteReply(interaction, '❌ Makayen hta user f room bch tkickih!');
+                    }
+
+                    const row = new ActionRowBuilder().addComponents(
+                        new UserSelectMenuBuilder()
+                            .setCustomId('kick_user_select')
+                            .setPlaceholder('Sélectionné user li bghiti tkickih')
+                    );
+                    
+                    return await interaction.reply({
+                        content: '👢 Sélectionné user li bghiti tkickih men room:',
+                        components: [row],
+                        ephemeral: true
+                    });
+                }
+
+                case 'claim': {
+                    if (isOwner) {
+                        return await autoDeleteReply(interaction, '⚠️ Nta déjà owner dyal had room!');
+                    }
+                    
+                    if (!memberInRoom) {
+                        return await autoDeleteReply(interaction, '❌ Khassak tkon f voice channel bch tclaimi ownership!');
+                    }
+                    
+                    // Check if current owner is still in room
+                    const currentOwnerInRoom = voiceChannel.members.has(ownerId);
+                    if (currentOwnerInRoom) {
+                        return await autoDeleteReply(interaction, '❌ Owner mazal kayn f room! Ma ymknch tclaimi daba.');
+                    }
+
+                    // Transfer ownership
+                    tempRooms.get(voiceChannelId).ownerId = interaction.user.id;
+                    
+                    // Update permissions
+                    await voiceChannel.permissionOverwrites.delete(ownerId).catch(() => {});
+                    await voiceChannel.permissionOverwrites.edit(interaction.user.id, {
+                        ManageChannels: true,
+                        MuteMembers: true,
+                        DeafenMembers: true,
+                        MoveMembers: true,
+                        ViewChannel: true
+                    });
+                    
+                    // Update text channel permissions
+                    await interaction.channel.permissionOverwrites.delete(ownerId).catch(() => {});
+                    await interaction.channel.permissionOverwrites.edit(interaction.user.id, {
+                        ViewChannel: true,
+                        SendMessages: true,
+                        ReadMessageHistory: true
+                    });
+
+                    return await autoDeleteReply(interaction, '👑 Wlit owner dyal room b nja7! Daba nta lboss.');
+                }
+
+                case 'transfer': {
+                    if (!isOwner) return await autoDeleteReply(interaction, '⛔ Hada mashi room dyalk! Ghir owner y9der isift ownership.');
+                    
+                    const members = voiceChannel.members.filter(m => m.id !== ownerId);
+                    if (members.size === 0) {
+                        return await autoDeleteReply(interaction, '❌ Makayen hta user f room bch t3tih ownership!');
+                    }
+
+                    const row = new ActionRowBuilder().addComponents(
+                        new UserSelectMenuBuilder()
+                            .setCustomId('transfer_user_select')
+                            .setPlaceholder('Sélectionné new owner')
+                    );
+                    
+                    return await interaction.reply({
+                        content: '🔄 Sélectionné user li bghiti t3tih ownership:',
+                        components: [row],
+                        ephemeral: true
+                    });
+                }
+
+                case 'invite': {
+                    if (!memberInRoom) {
+                        return await autoDeleteReply(interaction, '❌ Khassak tkon f room bch t3té invite!');
+                    }
+
+                    const row = new ActionRowBuilder().addComponents(
+                        new UserSelectMenuBuilder()
+                            .setCustomId('invite_user_select')
+                            .setPlaceholder('Sélectionné user bch t3tih invite f DM')
+                    );
+                    
+                    return await interaction.reply({
+                        content: '📩 Sélectionné user li bghiti t3tih invite link f DM:',
+                        components: [row],
+                        ephemeral: true
+                    });
+                }
+            }
+        }
+
+        // ==================== MODAL SUBMISSIONS ====================
+        if (interaction.isModalSubmit()) {
+            const roomInfo = getRoomDataByTextChannel(interaction.channel.id);
+            if (!roomInfo) return;
+
+            const { voiceChannelId } = roomInfo;
+            const voiceChannel = interaction.guild.channels.cache.get(voiceChannelId);
+            if (!voiceChannel) return;
+
+            if (interaction.customId === 'limit_modal') {
+                const value = interaction.fields.getTextInputValue('limit_value');
+                const limit = parseInt(value);
+                
+                if (isNaN(limit) || limit < 0 || limit > 99) {
+                    return await autoDeleteReply(interaction, '❌ Nombre mashi valid! Khass ykoun bin 0 o 99.');
+                }
+
+                await voiceChannel.setUserLimit(limit);
+                return await autoDeleteReply(interaction, `👥 Limit tbaddel b nja7: **${limit === 0 ? 'Unlimited' : limit}** users.`);
+            }
+
+            if (interaction.customId === 'rename_modal') {
+                const newName = interaction.fields.getTextInputValue('new_name');
+                
+                if (!newName || newName.length < 1 || newName.length > 100) {
+                    return await autoDeleteReply(interaction, '❌ Smit channel mashi valid!');
+                }
+
+                await voiceChannel.setName(newName);
+                return await autoDeleteReply(interaction, `✏️ Smit channel tbaddel b nja7: **${newName}**`);
+            }
+        }
+
+        // ==================== USER SELECT MENUS ====================
+        if (interaction.isUserSelectMenu()) {
+            const roomInfo = getRoomDataByTextChannel(interaction.channel.id);
+            if (!roomInfo) {
+                return await autoDeleteUpdate(interaction, '❌ Hada mashi room dyalk!');
+            }
+
+            const { voiceChannelId, ownerId } = roomInfo;
+            const voiceChannel = interaction.guild.channels.cache.get(voiceChannelId);
+            if (!voiceChannel) {
+                return await autoDeleteUpdate(interaction, '❌ Room ma kaynch!');
+            }
+
+            const targetId = interaction.values[0];
+            const target = await interaction.guild.members.fetch(targetId).catch(() => null);
+            
+            if (!target) {
+                return await autoDeleteUpdate(interaction, '❌ Ma qdertch nl9a had user!');
+            }
+
+            switch (interaction.customId) {
+                case 'ban_user_select': {
+                    // Ban from voice
+                    await voiceChannel.permissionOverwrites.edit(targetId, { Connect: false });
+                    
+                    // Disconnect if in channel
+                    if (voiceChannel.members.has(targetId)) {
+                        await target.voice.disconnect().catch(() => {});
+                    }
+                    
+                    return await autoDeleteUpdate(interaction, `🚫 **${target.displayName}** tban men room! Ma y9derch ydkhel daba.`);
+                }
+
+                case 'kick_user_select': {
+                    if (!voiceChannel.members.has(targetId)) {
+                        return await autoDeleteUpdate(interaction, '❌ Had user ma kaynch f room daba!');
+                    }
+                    
+                    await target.voice.disconnect();
+                    return await autoDeleteUpdate(interaction, `👢 **${target.displayName}** tkicka men room!`);
+                }
+
+                case 'transfer_user_select': {
+                    if (!voiceChannel.members.has(targetId)) {
+                        return await autoDeleteUpdate(interaction, '❌ Khass user ykon f room bch t3tih ownership!');
+                    }
+
+                    // Update state
+                    tempRooms.get(voiceChannelId).ownerId = targetId;
+                    
+                    // Update voice permissions
+                    await voiceChannel.permissionOverwrites.delete(ownerId).catch(() => {});
+                    await voiceChannel.permissionOverwrites.edit(targetId, {
+                        ManageChannels: true,
+                        MuteMembers: true,
+                        DeafenMembers: true,
+                        MoveMembers: true,
+                        ViewChannel: true
+                    });
+                    
+                    // Update text permissions
+                    await interaction.channel.permissionOverwrites.delete(ownerId).catch(() => {});
+                    await interaction.channel.permissionOverwrites.edit(targetId, {
+                        ViewChannel: true,
+                        SendMessages: true,
+                        ReadMessageHistory: true
+                    });
+
+                    return await autoDeleteUpdate(interaction, `🔄 Ownership t3tet b nja7 l **${target.displayName}**! Daba howa lboss.`);
+                }
+
+                case 'invite_user_select': {
+                    try {
+                        const invite = await voiceChannel.createInvite({ maxAge: 3600, maxUses: 1, unique: true });
+                        await target.send({
+                            content: `📩 **${interaction.member.displayName}** 3tak invite l room: **${voiceChannel.name}**\n🔗 Link: ${invite.url}\n⏰ Expire f 1 sa3a.`,
+                            components: [new ActionRowBuilder().addComponents(
+                                new ButtonBuilder().setLabel('Join Room').setStyle(ButtonStyle.Link).setURL(invite.url)
+                            )]
+                        });
+                        return await autoDeleteUpdate(interaction, `📩 Invite t3tet l **${target.displayName}** f DM!`);
+                    } catch (error) {
+                        return await autoDeleteUpdate(interaction, '❌ Ma qdertch n3tih DM! Ymkn DM dyalo msdoud.');
+                    }
+                }
+            }
+        }
+
+        // ==================== STRING SELECT MENUS ====================
+        if (interaction.isStringSelectMenu() && interaction.customId === 'unban_user_select') {
+            const roomInfo = getRoomDataByTextChannel(interaction.channel.id);
+            if (!roomInfo) {
+                return await autoDeleteUpdate(interaction, '❌ Hada mashi room dyalk!');
+            }
+
+            const voiceChannel = interaction.guild.channels.cache.get(roomInfo.voiceChannelId);
+            if (!voiceChannel) {
+                return await autoDeleteUpdate(interaction, '❌ Room ma kaynch!');
+            }
+
+            const targetId = interaction.values[0];
+            await voiceChannel.permissionOverwrites.delete(targetId);
+            
+            return await autoDeleteUpdate(interaction, '✅ User unbanni b nja7! Daba y9der ydkhel l room.');
+        }
+
+    } catch (error) {
+        console.error('Interaction error:', error);
+        try {
+            if (interaction.replied || interaction.deferred) {
+                await autoDeleteFollowUp(interaction, '❌ Chi haja khlat f system! Jareb merra okhra.');
+            } else {
+                await autoDeleteReply(interaction, '❌ Chi haja khlat f system! Jareb merra okhra.');
+            }
+        } catch {}
+    }
+});
+
+// ==========================================
+// ERROR HANDLING
+// ==========================================
+process.on('unhandledRejection', error => {
+    console.error('Unhandled Rejection:', error);
+});
+
+process.on('uncaughtException', error => {
+    console.error('Uncaught Exception:', error);
+});
+
+// Login
 client.login(process.env.TOKEN);
