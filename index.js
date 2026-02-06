@@ -22,12 +22,23 @@ import {
 } from 'discord.js';
 
 // ==========================================
-// TOKEN MEN DISCLOUD ENVIRONMENT
+// TOKEN - Y9RA MEN token.js (F PC) WALA process.env (F HOST)
 // ==========================================
-const TOKEN = process.env.TOKEN;
+let TOKEN;
+
+try {
+    // N7awel n9ra men token.js (f PC dyalek)
+    const { TOKEN: localToken } = await import('./token.js');
+    TOKEN = localToken;
+    console.log('✅ Token men token.js');
+} catch (e) {
+    // Ila ma l9ahch, n9ra men Environment Variables (f host)
+    TOKEN = process.env.TOKEN;
+    console.log('✅ Token men Environment Variables');
+}
 
 if (!TOKEN) {
-    console.error('❌ TOKEN ma kaynch! Zid TOKEN f Discloud Environment Variables.');
+    console.error('❌ TOKEN ma kaynch! Zid TOKEN f token.js wala f Discloud Environment Variables.');
     process.exit(1);
 }
 
@@ -203,7 +214,6 @@ client.once(Events.ClientReady, async () => {
 // EVENT: VOICE STATE UPDATE (CORE LOGIC)
 // ==========================================
 client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
-    // CASE 1: User joined a channel (not switched)
     if (newState.channel && !oldState.channel) {
         const channel = newState.channel;
         
@@ -278,7 +288,6 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
         }
     }
 
-    // CASE 2: User left a channel completely
     if (oldState.channel && !newState.channel) {
         const roomData = tempRooms.get(oldState.channel.id);
         
@@ -300,7 +309,6 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
         }
     }
 
-    // CASE 3: User switched channels
     if (oldState.channel && newState.channel && oldState.channel.id !== newState.channel.id) {
         const roomData = tempRooms.get(oldState.channel.id);
         
@@ -325,7 +333,6 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
 // ==========================================
 client.on(Events.InteractionCreate, async (interaction) => {
     try {
-        // ==================== SLASH COMMANDS ====================
         if (interaction.isChatInputCommand()) {
             
             if (interaction.commandName === 'setrole') {
@@ -381,7 +388,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
             }
         }
 
-        // ==================== ROLE SELECT MENU ====================
         if (interaction.isRoleSelectMenu() && interaction.customId === 'select_staff_role') {
             const roleId = interaction.values[0];
             staffRoles.set(interaction.guild.id, roleId);
@@ -390,7 +396,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
             return;
         }
 
-        // ==================== BUTTON INTERACTIONS ====================
         if (interaction.isButton()) {
             const roomInfo = getRoomDataByTextChannel(interaction.channel.id);
             
@@ -627,7 +632,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
             }
         }
 
-        // ==================== MODAL SUBMISSIONS ====================
         if (interaction.isModalSubmit()) {
             const roomInfo = getRoomDataByTextChannel(interaction.channel.id);
             if (!roomInfo) return;
@@ -660,7 +664,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
             }
         }
 
-        // ==================== USER SELECT MENUS ====================
         if (interaction.isUserSelectMenu()) {
             const roomInfo = getRoomDataByTextChannel(interaction.channel.id);
             if (!roomInfo) {
@@ -743,7 +746,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
             }
         }
 
-        // ==================== STRING SELECT MENUS ====================
         if (interaction.isStringSelectMenu() && interaction.customId === 'unban_user_select') {
             const roomInfo = getRoomDataByTextChannel(interaction.channel.id);
             if (!roomInfo) {
@@ -773,9 +775,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 });
 
-// ==========================================
-// ERROR HANDLING
-// ==========================================
 process.on('unhandledRejection', error => {
     console.error('Unhandled Rejection:', error);
 });
@@ -784,5 +783,4 @@ process.on('uncaughtException', error => {
     console.error('Uncaught Exception:', error);
 });
 
-// Login
 client.login(TOKEN);
