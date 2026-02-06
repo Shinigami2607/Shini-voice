@@ -1,0 +1,2 @@
+// token.js - HADA F PC DYALEK GHAIR, MA T7ETCH F GITHUB!
+export const TOKEN = 'YOUR_BOT_TOKEN_HERE';
