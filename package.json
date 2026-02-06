@@ -1,16 +1,16 @@
 {
   "name": "shini-voice",
   "version": "1.0.0",
-  "description": "Universal TempVoice Bot - Works on any server without setup",
+  "description": "Discord bot for Shini Voice temporary channels",
   "main": "index.js",
-  "type": "module",
   "scripts": {
     "start": "node index.js"
   },
+  "keywords": [],
+  "author": "YourName",
+  "license": "ISC",
   "dependencies": {
-    "discord.js": "^14.11.0"
-  },
-  "engines": {
-    "node": "18.x"
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.4.1"
   }
 }
