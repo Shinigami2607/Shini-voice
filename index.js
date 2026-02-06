@@ -38,13 +38,11 @@ const client = new Client({
 // ==========================================
 const tempRooms = new Collection();        // voiceChannelId -> { ownerId, textChannelId, createdAt, motherChannelId }
 const motherChannels = new Collection();   // channelId -> { guildId, creatorId }
-const staffRoles = new Collection();       // guildId -> roleId
-const guildSettings = new Collection();    // guildId -> { adminRoleId }
+const staffRoles = new Collection();       // guildId -> roleId (optional)
 
 // Constants
 const MOTHER_PREFIX = '➕';
 const AUTO_DELETE_MS = 10000;
-const ADMIN_ROLE_NAME = 'TempVoice Admin';
 
 // ==========================================
 // UTILITY FUNCTIONS
@@ -82,20 +80,20 @@ const autoDeleteFollowUp = async (interaction, content, ephemeral = true) => {
 };
 
 // ==========================================
-// PERMISSION CHECKS
+// PERMISSION CHECKS (BILA SETUP)
 // ==========================================
 const isServerOwner = (member) => member.id === member.guild.ownerId;
 
-const isStaff = (member) => {
+const isStaffOrOwner = (member) => {
+    // Owner always has access
     if (isServerOwner(member)) return true;
+    
+    // Check staff role if set
     const staffRoleId = staffRoles.get(member.guild.id);
-    if (!staffRoleId) return false;
-    return member.roles.cache.has(staffRoleId);
-};
-
-const isRoomOwner = (channelId, userId) => {
-    const room = tempRooms.get(channelId);
-    return room?.ownerId === userId;
+    if (staffRoleId && member.roles.cache.has(staffRoleId)) return true;
+    
+    // If no staff role set, only owner can create
+    return false;
 };
 
 const getRoomDataByTextChannel = (textChannelId) => {
@@ -106,64 +104,14 @@ const getRoomDataByTextChannel = (textChannelId) => {
 };
 
 // ==========================================
-// AUTO-SETUP: CREATE ADMIN ROLE
-// ==========================================
-const setupGuildAdminRole = async (guild) => {
-    try {
-        // Check if role already exists
-        let adminRole = guild.roles.cache.find(r => r.name === ADMIN_ROLE_NAME);
-        
-        if (!adminRole) {
-            // Create the role with Administrator permissions
-            adminRole = await guild.roles.create({
-                name: ADMIN_ROLE_NAME,
-                permissions: [PermissionsBitField.Flags.Administrator],
-                color: 0x5865F2,
-                hoist: true,
-                mentionable: false,
-                reason: 'TempVoice System - Auto-setup Admin Role'
-            });
-            console.log(`Created ${ADMIN_ROLE_NAME} in ${guild.name}`);
-        }
-
-        // Store in settings
-        guildSettings.set(guild.id, { adminRoleId: adminRole.id });
-
-        // Attempt to position the role as high as possible (just below bot's highest role)
-        const botMember = await guild.members.fetch(client.user.id);
-        const botHighestRole = botMember.roles.highest;
-        
-        if (botHighestRole && botHighestRole.position > adminRole.position) {
-            // Position it just below the bot's highest role
-            const newPosition = botHighestRole.position - 1;
-            if (newPosition > 0) {
-                await adminRole.setPosition(newPosition).catch(err => {
-                    console.log(`Could not reposition role in ${guild.name}: ${err.message}`);
-                });
-            }
-        }
-
-        // Assign the role to the bot
-        if (!botMember.roles.cache.has(adminRole.id)) {
-            await botMember.roles.add(adminRole).catch(err => {
-                console.log(`Could not assign admin role to bot in ${guild.name}: ${err.message}`);
-            });
-        }
-
-        return adminRole;
-    } catch (error) {
-        console.error(`Failed to setup admin role in ${guild.name}:`, error);
-        return null;
-    }
-};
-
-// ==========================================
 // INTERFACE CREATION
 // ==========================================
 const createRoomInterface = async (textChannel, voiceChannel) => {
+    const roomData = tempRooms.get(voiceChannel.id);
+    
     const embed = new EmbedBuilder()
         .setTitle('🎙️ Voice Room Control Panel')
-        .setDescription(`**Channel:** <#${voiceChannel.id}>\n**Owner:** <@${tempRooms.get(voiceChannel.id)?.ownerId}>\n\nManage your room using the controls below.`)
+        .setDescription(`**Channel:** <#${voiceChannel.id}>\n**Owner:** <@${roomData?.ownerId}>\n\nManage your room using the controls below.`)
         .setColor(0x5865F2)
         .setThumbnail('https://cdn.discordapp.com/emojis/1056024654695182356.webp')
         .addFields(
@@ -213,13 +161,13 @@ const createRoomInterface = async (textChannel, voiceChannel) => {
 const commands = [
     {
         name: 'setrole',
-        description: 'Set the staff role for TempVoice management (Server Owner only)',
+        description: 'Set optional staff role for TempVoice (Server Owner only)',
         type: 1,
         default_member_permissions: PermissionFlagsBits.Administrator
     },
     {
         name: 'voice',
-        description: 'Create a mother channel generator (Staff only)',
+        description: 'Create a mother channel generator (Server Owner or Staff)',
         type: 1,
         options: [
             {
@@ -237,6 +185,7 @@ const commands = [
 // ==========================================
 client.once(Events.ClientReady, async () => {
     console.log(`✅ Bot logged in as ${client.user.tag}`);
+    console.log(`🌐 Ready to work on any server! No setup required.`);
     
     try {
         const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
@@ -245,19 +194,6 @@ client.once(Events.ClientReady, async () => {
     } catch (error) {
         console.error('❌ Command registration failed:', error);
     }
-
-    // Setup existing guilds (in case bot was offline during invites)
-    for (const guild of client.guilds.cache.values()) {
-        await setupGuildAdminRole(guild);
-    }
-});
-
-// ==========================================
-// EVENT: GUILD CREATE (AUTO-SETUP)
-// ==========================================
-client.on(Events.GuildCreate, async (guild) => {
-    console.log(`📥 Joined guild: ${guild.name} (${guild.id})`);
-    await setupGuildAdminRole(guild);
 });
 
 // ==========================================
@@ -335,6 +271,8 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
                 // Create control interface
                 await createRoomInterface(textChannel, voiceChannel);
 
+                console.log(`✅ Created room: ${roomName} in ${channel.guild.name}`);
+
             } catch (error) {
                 console.error('❌ Error creating temp room:', error);
                 try {
@@ -353,17 +291,14 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
             try {
                 const textChannel = oldState.guild.channels.cache.get(roomData.textChannelId);
                 
-                // Delete text channel first
                 if (textChannel) {
                     await textChannel.delete().catch(err => console.log('Text channel delete error:', err));
                 }
                 
-                // Delete voice channel
                 await oldState.channel.delete().catch(err => console.log('Voice channel delete error:', err));
                 
-                // Clean up state
                 tempRooms.delete(oldState.channel.id);
-                console.log(`🗑️ Deleted room owned by ${oldState.member.displayName} (owner left)`);
+                console.log(`🗑️ Deleted room: Owner left`);
             } catch (error) {
                 console.error('❌ Error deleting room:', error);
             }
@@ -374,7 +309,6 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
     if (oldState.channel && newState.channel && oldState.channel.id !== newState.channel.id) {
         const roomData = tempRooms.get(oldState.channel.id);
         
-        // If owner switched out of their room, delete it
         if (roomData && roomData.ownerId === oldState.member.id) {
             try {
                 const textChannel = oldState.guild.channels.cache.get(roomData.textChannelId);
@@ -383,7 +317,7 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
                 await oldState.channel.delete().catch(() => {});
                 
                 tempRooms.delete(oldState.channel.id);
-                console.log(`🗑️ Deleted room (owner switched to another channel)`);
+                console.log(`🗑️ Deleted room: Owner switched`);
             } catch (error) {
                 console.error('❌ Error deleting room on switch:', error);
             }
@@ -399,7 +333,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         // ==================== SLASH COMMANDS ====================
         if (interaction.isChatInputCommand()) {
             
-            // /setrole - Server Owner only
+            // /setrole - Server Owner only (OPTIONAL)
             if (interaction.commandName === 'setrole') {
                 if (!isServerOwner(interaction.member)) {
                     return await autoDeleteReply(interaction, '⛔ Hada command khasso ykoun Server Owner berra7! Ma3ndksh l7e9.');
@@ -412,16 +346,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 );
 
                 return await interaction.reply({
-                    content: '👇 Sélectionné role li ghadi ykoun staff:',
+                    content: '👇 Sélectionné role li ghadi ykoun staff (ikhtiyari):',
                     components: [row],
                     ephemeral: true
                 });
             }
 
-            // /voice - Staff only
+            // /voice - Server Owner or Staff (ikhtiyari)
             if (interaction.commandName === 'voice') {
-                if (!isStaff(interaction.member)) {
-                    return await autoDeleteReply(interaction, '⛔ Vérifié role d staff! Ma3ndksh l7e9 bch tcreé mother channel.');
+                if (!isStaffOrOwner(interaction.member)) {
+                    return await autoDeleteReply(interaction, '⛔ Ghir Server Owner y9der ycreé mother channel! /setrole khass ila bghiti tzid staff.');
                 }
 
                 const name = interaction.options.getString('name');
@@ -446,7 +380,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                         creatorId: interaction.user.id
                     });
 
-                    return await autoDeleteReply(interaction, `✅ Safye, créé mother channel: **${channel.name}**`);
+                    return await autoDeleteReply(interaction, `✅ Safye, créé mother channel: **${channel.name}**\n\nℹ️ **Kifach tkhdem:** Dkhél l had channel bach tcreé room dyalek!`);
                 } catch (error) {
                     console.error('Mother channel creation error:', error);
                     return await autoDeleteReply(interaction, '❌ Ma qdertch ncreé channel! Vérifié permissions dyali.');
@@ -465,7 +399,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // ==================== BUTTON INTERACTIONS ====================
         if (interaction.isButton()) {
-            // Find room data by text channel
             const roomInfo = getRoomDataByTextChannel(interaction.channel.id);
             
             if (!roomInfo) {
@@ -574,7 +507,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 case 'unban': {
                     if (!isOwner) return await autoDeleteReply(interaction, '⛔ Hada mashi room dyalk! Ghir owner y9der iunbanni.');
                     
-                    // Find banned users (those denied Connect permission)
                     const bannedOverwrites = voiceChannel.permissionOverwrites.cache.filter(
                         perm => perm.deny.has(PermissionsBitField.Flags.Connect) && perm.type === 1
                     );
@@ -635,7 +567,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
                         return await autoDeleteReply(interaction, '❌ Khassak tkon f voice channel bch tclaimi ownership!');
                     }
                     
-                    // Check if current owner is still in room
                     const currentOwnerInRoom = voiceChannel.members.has(ownerId);
                     if (currentOwnerInRoom) {
                         return await autoDeleteReply(interaction, '❌ Owner mazal kayn f room! Ma ymknch tclaimi daba.');
@@ -654,7 +585,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
                         ViewChannel: true
                     });
                     
-                    // Update text channel permissions
                     await interaction.channel.permissionOverwrites.delete(ownerId).catch(() => {});
                     await interaction.channel.permissionOverwrites.edit(interaction.user.id, {
                         ViewChannel: true,
@@ -761,10 +691,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             switch (interaction.customId) {
                 case 'ban_user_select': {
-                    // Ban from voice
                     await voiceChannel.permissionOverwrites.edit(targetId, { Connect: false });
                     
-                    // Disconnect if in channel
                     if (voiceChannel.members.has(targetId)) {
                         await target.voice.disconnect().catch(() => {});
                     }
@@ -786,10 +714,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
                         return await autoDeleteUpdate(interaction, '❌ Khass user ykon f room bch t3tih ownership!');
                     }
 
-                    // Update state
                     tempRooms.get(voiceChannelId).ownerId = targetId;
                     
-                    // Update voice permissions
                     await voiceChannel.permissionOverwrites.delete(ownerId).catch(() => {});
                     await voiceChannel.permissionOverwrites.edit(targetId, {
                         ManageChannels: true,
@@ -799,7 +725,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
                         ViewChannel: true
                     });
                     
-                    // Update text permissions
                     await interaction.channel.permissionOverwrites.delete(ownerId).catch(() => {});
                     await interaction.channel.permissionOverwrites.edit(targetId, {
                         ViewChannel: true,
