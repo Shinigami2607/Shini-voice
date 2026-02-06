@@ -20,7 +20,16 @@ import {
     RoleSelectMenuBuilder, 
     UserSelectMenuBuilder 
 } from 'discord.js';
-import 'dotenv/config';
+
+// ==========================================
+// TOKEN MEN DISCLOUD ENVIRONMENT
+// ==========================================
+const TOKEN = process.env.TOKEN;
+
+if (!TOKEN) {
+    console.error('❌ TOKEN ma kaynch! Zid TOKEN f Discloud Environment Variables.');
+    process.exit(1);
+}
 
 const client = new Client({
     intents: [
@@ -36,11 +45,10 @@ const client = new Client({
 // ==========================================
 // STATE MANAGEMENT
 // ==========================================
-const tempRooms = new Collection();        // voiceChannelId -> { ownerId, textChannelId, createdAt, motherChannelId }
-const motherChannels = new Collection();   // channelId -> { guildId, creatorId }
-const staffRoles = new Collection();       // guildId -> roleId (optional)
+const tempRooms = new Collection();
+const motherChannels = new Collection();
+const staffRoles = new Collection();
 
-// Constants
 const MOTHER_PREFIX = '➕';
 const AUTO_DELETE_MS = 10000;
 
@@ -80,19 +88,14 @@ const autoDeleteFollowUp = async (interaction, content, ephemeral = true) => {
 };
 
 // ==========================================
-// PERMISSION CHECKS (BILA SETUP)
+// PERMISSION CHECKS
 // ==========================================
 const isServerOwner = (member) => member.id === member.guild.ownerId;
 
 const isStaffOrOwner = (member) => {
-    // Owner always has access
     if (isServerOwner(member)) return true;
-    
-    // Check staff role if set
     const staffRoleId = staffRoles.get(member.guild.id);
     if (staffRoleId && member.roles.cache.has(staffRoleId)) return true;
-    
-    // If no staff role set, only owner can create
     return false;
 };
 
@@ -188,7 +191,7 @@ client.once(Events.ClientReady, async () => {
     console.log(`🌐 Ready to work on any server! No setup required.`);
     
     try {
-        const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+        const rest = new REST({ version: '10' }).setToken(TOKEN);
         await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
         console.log('🚀 Global commands registered');
     } catch (error) {
@@ -204,12 +207,10 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
     if (newState.channel && !oldState.channel) {
         const channel = newState.channel;
         
-        // Check if it's a mother channel
         const isMother = channel.name.startsWith(MOTHER_PREFIX) || motherChannels.has(channel.id);
         
         if (isMother) {
             try {
-                // Create voice channel
                 const roomName = `🎙️ ${newState.member.displayName}'s Room`;
                 const voiceChannel = await channel.guild.channels.create({
                     name: roomName,
@@ -233,7 +234,6 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
                     ]
                 });
 
-                // Create associated text channel
                 const textChannelName = `room-${newState.member.displayName.toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
                 const textChannel = await channel.guild.channels.create({
                     name: textChannelName,
@@ -257,7 +257,6 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
                     ]
                 });
 
-                // Store room data
                 tempRooms.set(voiceChannel.id, {
                     ownerId: newState.member.id,
                     textChannelId: textChannel.id,
@@ -265,10 +264,7 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
                     motherChannelId: channel.id
                 });
 
-                // Move user to new room
                 await newState.member.voice.setChannel(voiceChannel);
-
-                // Create control interface
                 await createRoomInterface(textChannel, voiceChannel);
 
                 console.log(`✅ Created room: ${roomName} in ${channel.guild.name}`);
@@ -282,12 +278,11 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
         }
     }
 
-    // CASE 2: User left a channel completely (not switched)
+    // CASE 2: User left a channel completely
     if (oldState.channel && !newState.channel) {
         const roomData = tempRooms.get(oldState.channel.id);
         
         if (roomData && roomData.ownerId === oldState.member.id) {
-            // Owner left - DELETE IMMEDIATELY
             try {
                 const textChannel = oldState.guild.channels.cache.get(roomData.textChannelId);
                 
@@ -333,7 +328,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         // ==================== SLASH COMMANDS ====================
         if (interaction.isChatInputCommand()) {
             
-            // /setrole - Server Owner only (OPTIONAL)
             if (interaction.commandName === 'setrole') {
                 if (!isServerOwner(interaction.member)) {
                     return await autoDeleteReply(interaction, '⛔ Hada command khasso ykoun Server Owner berra7! Ma3ndksh l7e9.');
@@ -352,7 +346,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 });
             }
 
-            // /voice - Server Owner or Staff (ikhtiyari)
             if (interaction.commandName === 'voice') {
                 if (!isStaffOrOwner(interaction.member)) {
                     return await autoDeleteReply(interaction, '⛔ Ghir Server Owner y9der ycreé mother channel! /setrole khass ila bghiti tzid staff.');
@@ -572,10 +565,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
                         return await autoDeleteReply(interaction, '❌ Owner mazal kayn f room! Ma ymknch tclaimi daba.');
                     }
 
-                    // Transfer ownership
                     tempRooms.get(voiceChannelId).ownerId = interaction.user.id;
                     
-                    // Update permissions
                     await voiceChannel.permissionOverwrites.delete(ownerId).catch(() => {});
                     await voiceChannel.permissionOverwrites.edit(interaction.user.id, {
                         ManageChannels: true,
@@ -794,4 +785,4 @@ process.on('uncaughtException', error => {
 });
 
 // Login
-client.login(process.env.TOKEN);
+client.login(TOKEN);
