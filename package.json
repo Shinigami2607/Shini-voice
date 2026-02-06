@@ -1,7 +1,7 @@
 {
   "name": "shini-voice",
   "version": "1.0.0",
-  "description": "Discord Voice Bot",
+  "description": "Universal TempVoice Bot - Works on any server without setup",
   "main": "index.js",
   "type": "module",
   "scripts": {
