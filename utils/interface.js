@@ -3,38 +3,28 @@ const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('
 function createInterface() {
     const embed = new EmbedBuilder()
         .setTitle('TempVoice Interface')
-        .setDescription('This interface can be used to manage temporary voice channels.\nMore options are available with /voice commands.')
+        .setDescription('استخدم الأزرار أسفله لإدارة غرفتك الشخصية.\nالمزيد من الخيارات متاحة عبر أوامر /voice.')
         .setColor('#2b2d31')
-        .setFooter({ text: 'Press the buttons below to use the interface.' });
+        .setFooter({ text: 'إضغط على الأزرار للتحكم في الروم.' });
 
-    // الصف الأول ديال البوطونات
+    // الصف الأول: الأوامر الأساسية (المطابقة لـ interactionCreate.js)
     const row1 = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('vc_name').setLabel('NAME').setEmoji('🆔').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('vc_limit').setLabel('LIMIT').setEmoji('👥').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('vc_lock').setLabel('PRIVACY').setEmoji('🔒').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('vc_waiting').setLabel('WAITING R.').setEmoji('🕒').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('vc_chat').setLabel('CHAT').setEmoji('💬').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('rename').setLabel('NAME').setEmoji('📝').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('limit').setLabel('LIMIT').setEmoji('👥').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('privacy').setLabel('LOCK').setEmoji('🔒').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('chat').setLabel('CHAT').setEmoji('💬').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('invite').setLabel('INVITE').setEmoji('📞').setStyle(ButtonStyle.Secondary),
     );
 
-    // الصف الثاني
+    // الصف الثاني: المنع والطرد
     const row2 = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('vc_trust').setLabel('TRUST').setEmoji('👤').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('vc_untrust').setLabel('UNTRUST').setEmoji('🚫').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('vc_invite').setLabel('INVITE').setEmoji('📞').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('vc_kick').setLabel('KICK').setEmoji('🔨').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('vc_region').setLabel('REGION').setEmoji('🌍').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('kick').setLabel('KICK').setEmoji('🔨').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('block').setLabel('BLOCK').setEmoji('🚫').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('claim').setLabel('CLAIM').setEmoji('👑').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('delete').setLabel('DELETE').setEmoji('🗑️').setStyle(ButtonStyle.Danger),
     );
 
-    // الصف الثالث
-    const row3 = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('vc_block').setLabel('BLOCK').setEmoji('🚫').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('vc_unblock').setLabel('UNBLOCK').setEmoji('🔓').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('vc_claim').setLabel('CLAIM').setEmoji('👑').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('vc_transfer').setLabel('TRANSFER').setEmoji('📈').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('vc_delete').setLabel('DELETE').setEmoji('🗑️').setStyle(ButtonStyle.Danger),
-    );
-
-    return { embeds: [embed], components: [row1, row2, row3] };
+    return { embeds: [embed], components: [row1, row2] };
 }
 
 module.exports = { createInterface };
